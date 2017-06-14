@@ -50,3 +50,5 @@ plaintext_password_LDADD = $(top_srcdir)/lib/libzc.la @CHECK_LIBS@
 plaintext_SOURCES = check_plaintext.c
 plaintext_CFLAGS = @CHECK_CFLAGS@ -I$(top_srcdir)/lib
 plaintext_LDADD = $(top_srcdir)/lib/libzc.la @CHECK_LIBS@
+
+@VALGRIND_CHECK_RULES@

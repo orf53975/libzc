@@ -5,6 +5,7 @@ AC_INIT([zc],
         [libzc],
         [http://github.com/mferland/libzc])
 m4_include([m4/ax_pthread.m4])
+m4_include([m4/ax_valgrind_check.m4])
 AC_CONFIG_SRCDIR([lib/libzc.c])
 AM_INIT_AUTOMAKE([-Wall -Werror -Wno-extra-portability])
 AC_SYS_LARGEFILE
@@ -60,6 +61,9 @@ AC_ARG_ENABLE([debug],
 AS_IF([test "x$enable_debug" = "xyes"], [
             AC_DEFINE(ENABLE_DEBUG, [1], [Debug messages.])
 ])
+
+AX_VALGRIND_DFLT([sgcheck], [off])
+AX_VALGRIND_CHECK
 
 AC_CONFIG_HEADERS(config.h)
 AC_CONFIG_FILES([
