@@ -26,15 +26,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include "libzc.h"
 #include "libzc_private.h"
 #include "crc32.h"
 #include "key2_reduce.h"
 
-#define k2(index) ptext->key2_final[index]
-#define k1(index) ptext->key1_final[index]
-#define k0(index) ptext->key0_final[index]
+#define k2(index) w->key2_final[index]
+#define k1(index) w->key1_final[index]
+#define k0(index) w->key0_final[index]
 #define cipher(index) ptext->ciphertext[index]
 #define plaintext(index) ptext->plaintext[index]
 #define SWAP(x, y) do { typeof(x) SWAP = x; x = y; y = SWAP; } while (0)
@@ -52,14 +53,15 @@ struct zc_crk_ptext {
 };
 
 struct worker {
-   uint32_t key2_final[13];
-   uint32_t key1_final[13];
-   uint32_t key0_final[13];
-   size_t offset;
-   size_t amount;
-   bool found;
-   struct zc_key inter_rep;     /* intermediate representation of the key */
-   const struct zc_crk_ptext *ptext;
+    uint32_t key2_final[13];
+    uint32_t key1_final[13];
+    uint32_t key0_final[13];
+    size_t offset;
+    size_t amount;
+    bool found;
+    struct zc_key inter_rep;     /* intermediate representation of the key */
+    const struct zc_crk_ptext *ptext;
+    pthread_t thread;
 };
 
 static uint8_t generate_key3(const struct zc_crk_ptext *ptext, uint32_t i)
@@ -203,7 +205,7 @@ static int ptext_final_init(struct ka **key2)
     return 0;
 }
 
-static uint32_t compute_key1_msb(struct zc_crk_ptext *ptext, uint32_t current_idx)
+static uint32_t compute_key1_msb(const struct zc_crk_ptext *ptext, uint32_t current_idx)
 {
     const uint32_t key2i = k2(current_idx);
     const uint32_t key2im1 = k2(current_idx - 1);
@@ -278,10 +280,10 @@ static void compute_key0(struct zc_crk_ptext *ptext)
         ptext->key_found = true;
 }
 
-static void recurse_key1(struct zc_crk_ptext *ptext, uint32_t current_idx)
+static void recurse_key1(struct worker *w, uint32_t current_idx)
 {
     if (current_idx == 3) {
-        compute_key0(ptext);
+        compute_key0(w);
         return;
     }
 
@@ -291,25 +293,25 @@ static void recurse_key1(struct zc_crk_ptext *ptext, uint32_t current_idx)
     uint8_t diff = msb(rhs_step2 - (mask_msb(k1(current_idx - 2))));
 
     for (uint32_t c = 2; c != 0; --c, --diff) {
-        for (uint32_t i = 0; i < ptext->lsbk0_count[diff]; ++i) {
-            uint32_t lsbkey0i = ptext->lsbk0_lookup[diff][i];
+        for (uint32_t i = 0; i < w->ptext->lsbk0_count[diff]; ++i) {
+            uint32_t lsbkey0i = w->ptext->lsbk0_lookup[diff][i];
             if (mask_msb(rhs_step1 - lsbkey0i) == mask_msb(k1(current_idx - 1))) {
-                ptext->key1_final[current_idx - 1] = rhs_step1 - lsbkey0i;
-                ptext->key0_final[current_idx] = lsbkey0i;
-                recurse_key1(ptext, current_idx - 1);
+                w->key1_final[current_idx - 1] = rhs_step1 - lsbkey0i;
+                w->key0_final[current_idx] = lsbkey0i;
+                recurse_key1(w, current_idx - 1);
             }
         }
     }
 }
 
-static void compute_key1(struct zc_crk_ptext *ptext)
+static void compute_key1(struct worker *w)
 {
     /* find matching msb, section 3.3 from Biham & Kocher */
     for (uint32_t i = 0; i < pow2(24); ++i) {
         const uint32_t key1_12_tmp = mask_msb(k1(12)) | i;
         const uint32_t key1_11_tmp = (key1_12_tmp - 1) * MULTINV;
         if (mask_msb(key1_11_tmp) == mask_msb(k1(11))) {
-            ptext->key1_final[12] = key1_12_tmp;
+            w->key1_final[12] = key1_12_tmp;
             recurse_key1(ptext, 12);
         }
     }
@@ -341,7 +343,7 @@ static void recurse_key2(struct worker *w, struct ka **array, uint32_t current_i
 
     for (uint32_t i = 0; i < array[current_idx - 1]->size; ++i) {
         w->key2_final[current_idx - 1] = ka_at(array[current_idx - 1], i);
-        w->key1_final[current_idx] = compute_key1_msb(ptext, current_idx) << 24;
+        w->key1_final[current_idx] = compute_key1_msb(w->ptext, current_idx) << 24;
         recurse_key2(w, array, current_idx - 1);
     }
 }
@@ -376,9 +378,44 @@ ZC_EXPORT int zc_crk_ptext_attack(struct zc_crk_ptext *ptext, struct zc_key *out
     return (ptext->key_found == true ? 0 : -1);
 }
 
-ZC_EXPORT void * worker(void *p)
+#define THREADS 1
+
+ZC_EXPORT int zc_crk_ptext_attack(struct zc_crk_ptext *ptext, struct *out_key)
 {
-   struct worker *w = (struct worker *)p;
+    struct worker *w;
+
+    w = calloc(THREADS, sizeof(struct worker));
+    if (!w)
+        return -1;
+
+    const size_t quot = ptext->key2->size / THREADS;
+    const size_t rem  = ptext->key2->size % THREADS;
+
+    for (int i = 0; i < THREADS; ++i) {
+        w->offset = i * quot;
+        w->amount = i == THREADS - 1 ? quot + rem : quot;
+        printf("thread: %zu - %zu\n", w->offset, w->amount);
+        pthread_create(&w[i].thread, NULL, worker, &w[i]);
+    }
+
+    /* TODO: create list of threads */
+    for (int i = 0; i < THREADS; ++i) {
+        pthread_join(w[i].thread, NULL);
+        if (w[i].found) {
+            out_key->key0 = w[i].inter_rep.key0;
+            out_key->key1 = w[i].inter_rep.key1;
+            out_key->key2 = w[i].inter_rep.key2;
+        }
+    }
+
+    free(w);
+
+    return 0;
+}
+
+void * worker(void *p)
+{
+    struct worker *w = (struct worker *)p;
 
     struct ka *array[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
@@ -386,10 +423,10 @@ ZC_EXPORT void * worker(void *p)
         return -1;
 
     for (size_t i = 0; i < w->amount; ++i) {
-       w->key2_final[12] = w->ptext->key2->array[w->offset + i];
-       recurse_key2(w, array, 12);
-       if (w->found)
-          break;                /* parent thread will collect result */
+        w->key2_final[12] = w->ptext->key2->array[w->offset + i];
+        recurse_key2(w, array, 12);
+        if (w->found)
+            break;                /* parent thread will collect result */
     }
 
     ptext_final_deinit(array);
